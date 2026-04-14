@@ -533,6 +533,17 @@ function speak(text) {
   const voices = speechSynthesis.getVoices();
   const ja = voices.find(v => v.lang && v.lang.startsWith('ja'));
   if (ja) utter.voice = ja;
+
+  // BGM音量を一時的に下げる（ダッキング）
+  if (state.currentGain && state.audioCtx) {
+    state.currentGain.gain.setTargetAtTime(0.1, state.audioCtx.currentTime, 0.1);
+  }
+  utter.onend = () => {
+    if (state.currentGain && state.isRunning && state.audioCtx) {
+      state.currentGain.gain.setTargetAtTime(0.4, state.audioCtx.currentTime, 0.3);
+    }
+  };
+
   speechSynthesis.speak(utter);
 }
 
@@ -563,7 +574,7 @@ function playPhaseAudio(key) {
   src.buffer = state.audioBuffers[key];
   src.loop = true;
   const gain = state.audioCtx.createGain();
-  gain.gain.value = 1.0;
+  gain.gain.value = 0.4;
   src.connect(gain);
   gain.connect(state.audioCtx.destination);
   state.audioPlayStart = state.audioCtx.currentTime;
@@ -590,7 +601,7 @@ function resumePhaseAudio() {
   src.buffer = state.audioBuffers[state.currentAudioKey];
   src.loop = true;
   const gain = state.audioCtx.createGain();
-  gain.gain.value = 1.0;
+  gain.gain.value = 0.4;
   src.connect(gain);
   gain.connect(state.audioCtx.destination);
   state.audioPlayStart = state.audioCtx.currentTime;
