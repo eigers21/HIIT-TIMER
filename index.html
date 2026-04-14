@@ -577,8 +577,10 @@ function loadAudioFromDB() {
     req.onsuccess = () => {
       const keys = req.result;
       if (keys.length === 0) { resolve(); return; }
-      let loaded = 0;
-      keys.forEach(key => {
+      
+      const loadNext = (idx) => {
+        if (idx >= keys.length) { resolve(); return; }
+        const key = keys[idx];
         const getReq = store.get(key);
         getReq.onsuccess = async () => {
           const fileData = getReq.result;
@@ -590,10 +592,12 @@ function loadAudioFromDB() {
           } catch (e) {
             console.warn('DB音声デコードエラー:', e);
           }
-          loaded++;
-          if (loaded === keys.length) resolve();
+          loadNext(idx + 1);
         };
-      });
+        getReq.onerror = () => loadNext(idx + 1);
+      };
+      
+      loadNext(0);
     };
     req.onerror = () => resolve();
   });
@@ -832,8 +836,9 @@ function renderSettings() {
       html += '<span class="duration-display">' + formatTime(phase.duration) + '</span>';
       html += '</div>';
       html += '<div class="phase-audio-row">';
-      html += '<label class="audio-upload-btn" for="audio-' + key + '">🎵 BGM選択</label>';
-      html += '<input type="file" id="audio-' + key + '" accept="audio/*" style="display:none" onchange="handleAudioUpload(\'' + key + '\',this)">';
+      const domId = 'audio-' + key + '-' + Math.floor(Math.random() * 10000);
+      html += '<label class="audio-upload-btn" for="' + domId + '">🎵 BGM選択</label>';
+      html += '<input type="file" id="' + domId + '" accept="audio/*" style="display:none" onchange="handleAudioUpload(\'' + key + '\',this)">';
       html += '<span class="audio-file-name">' + (audioName ? '♪ ' + escHtml(audioName) : '未設定') + '</span>';
       html += '</div>';
       html += '</div>';
@@ -882,7 +887,9 @@ function removePhase(bi, pi) {
 
 function handleAudioUpload(key, input) {
   if (!input.files || !input.files[0]) return;
-  loadAudioFile(input.files[0], key).then(() => renderSettings());
+  const file = input.files[0];
+  input.value = ''; // リセットして再度同じファイルも選べるようにする
+  loadAudioFile(file, key).then(() => renderSettings());
 }
 
 function resetToDefault() {
