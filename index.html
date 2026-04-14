@@ -515,9 +515,8 @@ function finishProgram() {
 
 /* ==================== 音声カウントダウン ==================== */
 function checkCountdown(remaining) {
-  // フェーズの最後のフェーズでは「スタート」の代わりに「終了」
   const isLast = state.currentIndex >= state.flatPhases.length - 1;
-  const map = { 4: '3', 3: '2', 2: '1', 1: isLast ? '終了' : 'スタート' };
+  const map = { 4: 'three', 3: 'TWO', 2: 'One', 1: isLast ? 'finish' : 'start' };
   if (map[remaining] && !state.spokenSeconds.has(remaining)) {
     state.spokenSeconds.add(remaining);
     speak(map[remaining]);
@@ -527,12 +526,12 @@ function checkCountdown(remaining) {
 function speak(text) {
   if (!('speechSynthesis' in window)) return;
   const utter = new SpeechSynthesisUtterance(text);
-  utter.lang = 'ja-JP';
+  utter.lang = 'en-US';
   utter.rate = 1.0;
   utter.volume = 1.0;
   const voices = speechSynthesis.getVoices();
-  const ja = voices.find(v => v.lang && v.lang.startsWith('ja'));
-  if (ja) utter.voice = ja;
+  const en = voices.find(v => v.lang && v.lang.startsWith('en'));
+  if (en) utter.voice = en;
 
   // BGM音量を一時的に下げる（ダッキング）
   if (state.currentGain && state.audioCtx) {
@@ -547,6 +546,66 @@ function speak(text) {
   speechSynthesis.speak(utter);
 }
 
+/* ==================== IndexedDB (BGM永続化) ==================== */
+const DB_NAME = 'hiit_audio_db';
+const STORE_NAME = 'audio_files';
+let idb;
+
+function initDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = (e) => {
+      idb = e.target.result;
+      if (!idb.objectStoreNames.contains(STORE_NAME)) {
+        idb.createObjectStore(STORE_NAME);
+      }
+    };
+    req.onsuccess = (e) => {
+      idb = e.target.result;
+      resolve();
+    };
+    req.onerror = reject;
+  });
+}
+
+function loadAudioFromDB() {
+  return new Promise((resolve) => {
+    if (!idb) { resolve(); return; }
+    const tx = idb.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.getAllKeys();
+    req.onsuccess = () => {
+      const keys = req.result;
+      if (keys.length === 0) { resolve(); return; }
+      let loaded = 0;
+      keys.forEach(key => {
+        const getReq = store.get(key);
+        getReq.onsuccess = async () => {
+          const fileData = getReq.result;
+          state.audioFileNames[key] = fileData.name;
+          ensureAudioCtx();
+          try {
+            const bufCopy = fileData.buffer.slice(0);
+            state.audioBuffers[key] = await state.audioCtx.decodeAudioData(bufCopy);
+          } catch (e) {
+            console.warn('DB音声デコードエラー:', e);
+          }
+          loaded++;
+          if (loaded === keys.length) resolve();
+        };
+      });
+    };
+    req.onerror = () => resolve();
+  });
+}
+
+function saveToDB(key, arrayBuffer, name) {
+  if (!idb) return;
+  const tx = idb.transaction(STORE_NAME, 'readwrite');
+  const store = tx.objectStore(STORE_NAME);
+  store.put({ buffer: arrayBuffer, name: name }, key);
+}
+
 /* ==================== Web Audio API ==================== */
 function ensureAudioCtx() {
   if (!state.audioCtx) {
@@ -559,6 +618,7 @@ async function loadAudioFile(file, key) {
   ensureAudioCtx();
   try {
     const buf = await file.arrayBuffer();
+    saveToDB(key, buf.slice(0), file.name);
     state.audioBuffers[key] = await state.audioCtx.decodeAudioData(buf);
     state.audioFileNames[key] = file.name;
   } catch (e) {
@@ -847,10 +907,16 @@ function init() {
   // プログラム読み込み
   state.blocks = loadProgram();
   rebuildProgram();
+  
   // イベントリスナー
   document.getElementById('openSettingsBtn').addEventListener('click', openSettings);
   document.getElementById('closeSettingsBtn').addEventListener('click', closeSettings);
   document.getElementById('btnCompleteReset').addEventListener('click', resetTimer);
+
+  // IndexedDB初期化と音声読み込み
+  initDB().then(() => {
+    loadAudioFromDB();
+  }).catch(e => console.warn('IndexedDB初期化エラー:', e));
 }
 
 document.addEventListener('DOMContentLoaded', init);
