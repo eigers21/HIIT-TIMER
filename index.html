@@ -838,7 +838,7 @@ function renderSettings() {
       html += '<div class="phase-audio-row">';
       const domId = 'audio-' + key + '-' + Math.floor(Math.random() * 10000);
       html += '<label class="audio-upload-btn" for="' + domId + '">🎵 BGM選択</label>';
-      html += '<input type="file" id="' + domId + '" accept="audio/*" style="display:none" onchange="handleAudioUpload(\'' + key + '\',this)">';
+      html += '<input type="file" id="' + domId + '" accept="audio/*,.mp3,.m4a,.wav,.aac,.ogg,.flac" style="display:none" onchange="handleAudioUpload(\'' + key + '\',this)">';
       html += '<span class="audio-file-name">' + (audioName ? '♪ ' + escHtml(audioName) : '未設定') + '</span>';
       html += '</div>';
       html += '</div>';
