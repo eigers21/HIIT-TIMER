@@ -417,6 +417,12 @@ function startTimer() {
   if (state.flatPhases.length === 0) return;
   // iOS: ユーザータップ時にオーディオセッションを確実に起動
   unlockAudioCtx();
+  // iOS: 音声合成のウォームアップ（空文字を発話して初期化）
+  if ('speechSynthesis' in window) {
+    const warmup = new SpeechSynthesisUtterance('');
+    warmup.volume = 0;
+    speechSynthesis.speak(warmup);
+  }
   state.isRunning = true;
   state.isPaused = false;
   state.currentIndex = 0;
@@ -526,21 +532,30 @@ function checkCountdown(remaining) {
 
 function speak(text) {
   if (!('speechSynthesis' in window)) return;
+  // iOS: 既存の発話をキャンセルしてから新しい発話を開始
+  speechSynthesis.cancel();
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = 'en-US';
   utter.rate = 1.0;
   utter.volume = 1.0;
+  utter.pitch = 1.0;
   const voices = speechSynthesis.getVoices();
   const en = voices.find(v => v.lang && v.lang.startsWith('en'));
   if (en) utter.voice = en;
 
   // BGM音量を一時的に下げる（ダッキング）
   if (state.currentGain && state.audioCtx) {
-    state.currentGain.gain.setTargetAtTime(0.1, state.audioCtx.currentTime, 0.1);
+    state.currentGain.gain.setTargetAtTime(0.1, state.audioCtx.currentTime, 0.05);
   }
   utter.onend = () => {
     if (state.currentGain && state.isRunning && state.audioCtx) {
-      state.currentGain.gain.setTargetAtTime(0.4, state.audioCtx.currentTime, 0.3);
+      state.currentGain.gain.setTargetAtTime(0.4, state.audioCtx.currentTime, 0.2);
+    }
+  };
+  // iOS: onerrorでもBGM音量を復帰
+  utter.onerror = () => {
+    if (state.currentGain && state.isRunning && state.audioCtx) {
+      state.currentGain.gain.setTargetAtTime(0.4, state.audioCtx.currentTime, 0.2);
     }
   };
 
@@ -626,8 +641,25 @@ function saveToDB(key, arrayBuffer, name) {
 function ensureAudioCtx() {
   if (!state.audioCtx) {
     state.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // 通知等でAudioContextが中断された際に自動復帰する
+    state.audioCtx.addEventListener('statechange', handleAudioStateChange);
   }
   if (state.audioCtx.state === 'suspended') state.audioCtx.resume();
+}
+
+// AudioContextの状態変化を監視（通知やアラームで中断→復帰）
+function handleAudioStateChange() {
+  if (!state.audioCtx) return;
+  if (state.audioCtx.state === 'interrupted' || state.audioCtx.state === 'suspended') {
+    // 中断されたら復帰を試みる
+    state.audioCtx.resume().catch(() => {});
+  }
+  if (state.audioCtx.state === 'running' && state.isRunning && !state.isPaused) {
+    // 復帰後、BGMが止まっていたら再開
+    if (!state.currentSource && state.currentAudioKey) {
+      resumePhaseAudio();
+    }
+  }
 }
 
 // iOS Safari: ユーザージェスチャー中にサイレントバッファを再生してオーディオセッションを起動
@@ -709,17 +741,63 @@ function stopPhaseAudio() {
   state.audioPlayOffset = 0;
 }
 
-/* ==================== Wake Lock ==================== */
+/* ==================== Wake Lock (スリープ防止) ==================== */
+// iOSフォールバック用: 極小の無音MP4をループ再生してスリープを防止
+let noSleepVideo = null;
+
+function createNoSleepVideo() {
+  if (noSleepVideo) return noSleepVideo;
+  const video = document.createElement('video');
+  video.setAttribute('playsinline', '');
+  video.setAttribute('muted', '');
+  video.muted = true;
+  video.loop = true;
+  video.style.position = 'fixed';
+  video.style.top = '-9999px';
+  video.style.left = '-9999px';
+  video.style.width = '1px';
+  video.style.height = '1px';
+  video.style.opacity = '0.01';
+  // 極小の無音MP4 (data URI)
+  video.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAAhtZGF0AAAA1m1vb3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAPoAAEAAAEAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAACYdHJhawAAAFx0a2hkAAAAAwAAAAAAAAAAAAAAAQAAAAAAAAPoAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAIAAAACAAAAAAkaW1kYQAAABJpbWRhcGluZwAAAAAAAAAAGmluZmUCAAAAAAEAAGF2YzEAAAAAABRpcmVmAAAAAAAAAAAIc3R0cwAAAAAAAA==';
+  document.body.appendChild(video);
+  noSleepVideo = video;
+  return video;
+}
+
 async function requestWakeLock() {
-  if (!('wakeLock' in navigator)) return;
+  // 1. Wake Lock APIを試みる
+  if ('wakeLock' in navigator) {
+    try {
+      state.wakeLock = await navigator.wakeLock.request('screen');
+      state.wakeLock.addEventListener('release', () => { state.wakeLock = null; });
+    } catch {}
+  }
+  // 2. iOSフォールバック: 無音動画ループ再生
   try {
-    state.wakeLock = await navigator.wakeLock.request('screen');
-    state.wakeLock.addEventListener('release', () => { state.wakeLock = null; });
+    const video = createNoSleepVideo();
+    await video.play();
   } catch {}
 }
 
 function releaseWakeLock() {
-  if (state.wakeLock) { state.wakeLock.release(); state.wakeLock = null; }
+  if (state.wakeLock) {
+    state.wakeLock.release(); state.wakeLock = null;
+  }
+  if (noSleepVideo) {
+    noSleepVideo.pause();
+  }
+}
+
+// ページが再表示された時にWake Lockを再取得
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible' && state.isRunning && !state.isPaused) {
+    requestWakeLock();
+    // AudioContextも復帰
+    if (state.audioCtx && state.audioCtx.state === 'suspended') {
+      state.audioCtx.resume();
+    }
+  }
 }
 
 /* ==================== UI更新 ==================== */
@@ -927,10 +1005,6 @@ function resetToDefault() {
 
 /* ==================== 初期化 ==================== */
 function init() {
-  // Wake Lock非対応チェック
-  if (!('wakeLock' in navigator)) {
-    document.getElementById('wake-lock-warning').classList.add('show');
-  }
   // 音声合成の初期化
   if ('speechSynthesis' in window) {
     speechSynthesis.getVoices();
@@ -944,6 +1018,9 @@ function init() {
   document.getElementById('openSettingsBtn').addEventListener('click', openSettings);
   document.getElementById('closeSettingsBtn').addEventListener('click', closeSettings);
   document.getElementById('btnCompleteReset').addEventListener('click', resetTimer);
+
+  // ページ表示復帰時の自動回復
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 
   // IndexedDB初期化と音声読み込み
   initDB().then(() => {
